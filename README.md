@@ -31,6 +31,7 @@ $ [OPTIONS] COMMAND [ARGS]...
 * `status`: Get crawling job status.
 * `download`: Download all crawled data if the job is...
 * `ls`: List all crawling jobs
+* `visited-pages`: Collect visited pages of url
 
 ## `crawl`
 
@@ -128,4 +129,22 @@ $ ls [OPTIONS]
 **Options**:
 
 * `--refresh / --no-refresh`: Request from the server current status for each incomplete job  [default: refresh]
+* `--help`: Show this message and exit.
+
+## `visited-pages`
+
+Collect visited pages of url and save them into file
+
+**Usage**:
+
+```console
+$ visited-pages [OPTIONS] URL
+```
+
+**Arguments**:
+
+* `URL`: The base URL to collect visited pages  [required]
+
+**Options**:
+
 * `--help`: Show this message and exit.
