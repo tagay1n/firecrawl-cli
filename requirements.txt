@@ -1,0 +1,4 @@
+typer
+firecrawl-py
+pydantic
+bs4
