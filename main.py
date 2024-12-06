@@ -1,7 +1,6 @@
-import datetime
 import json
 import os.path
-import re
+from datetime import datetime
 from urllib.parse import urlparse, urlunsplit
 
 import typer
@@ -20,17 +19,16 @@ app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
 supported_formats = ["markdown", "html", "rawHtml", "links", "screenshot"]
 
 client_config = {
-    'api_key': <SET-ME>,
-    'api_url': <SET-ME>,
+    'api_key': <SET ME>',
+    'api_url': <SET ME>,
 }
 
 app_config = {
     "reports_dir": "firecrawl-cli-workdir/reports",
-    "contents_dir": "firecrawl-cli-workdir/content",
+    "contents_dir": "/firecrawl-cli-workdir/content",
     "visited_pages_dir": "firecrawl-cli-workdir/visited_pages",
+    "no_md_pages": "firecrawl-cli-workdir/no-md-pages",
 }
-
-
 
 
 def _complete_limit(incomplete: str):
@@ -71,6 +69,12 @@ def crawl(
                 "--include-paths", "--ip",
                 help='JSON-array that specifies URL patterns to include in the crawl by comparing website paths against the provided regex patterns. Only the paths that match the specified patterns will be included in the response. For example, if you set "includePaths": ["blog/*"] for the base URL firecrawl.dev, only results matching that pattern will be included, such as https://www.firecrawl.dev/blog/firecrawl-launch-week-1-recap. Example: \'["/news/*", "/articles"]\'')
         ] = "[]",
+        ignore_sitemap: Annotated[
+            bool,
+            typer.Option(
+                "--ignore-sitemap/--no-ignore-sitemap", "--is/--nis",
+                help="Maximum depth to crawl relative to the entered URL.")
+        ] = True,
         max_depth: Annotated[
             int,
             typer.Option(
@@ -120,7 +124,7 @@ def crawl(
         "excludePaths": _parse_json(exclude_paths),
         "includePaths": _parse_json(include_paths),
         "maxDepth": max_depth,
-        "ignoreSitemap": True,
+        "ignoreSitemap": ignore_sitemap,
         "limit": limit,
         "allowBackwardLinks": False,
         "allowExternalLinks": False,
@@ -207,6 +211,7 @@ def ls(
     """
     _ls(refresh)
 
+
 @app.command()
 def visited_pages(
         url: Annotated[
@@ -232,13 +237,16 @@ def _crawl(url, params):
             _visited_pages = json.load(f)
 
     orig_excluded_path = params['excludePaths'].copy()
-    params['excludePaths'] += _visited_pages[:122_000]
+    params['excludePaths'] += _visited_pages
 
-    print("Sending request to server")
+    print("Sending request to server...")
+    idempotency_key = f"{url}+{datetime.today().strftime('%d-%m-%Y')}+1"
     result = _create_client().async_crawl_url(
         url,
-        params=params
+        params=params,
+        idempotency_key=idempotency_key
     )
+    print(_pretty_json(result))
 
     # do not save full exclude path because it can be very large
     params['excludePaths'] = orig_excluded_path
@@ -248,7 +256,9 @@ def _crawl(url, params):
 
     result['params'] = params
     result['crawl_url'] = url
-    _upsert_report(result['id'], result)
+    result['idempotency_key'] = idempotency_key
+    report = _upsert_report(result['id'], result)
+    return report, result
 
 
 def _cancel(_id: str):
@@ -297,6 +307,7 @@ def _ls(refresh: bool):
         )
     print(table)
 
+
 def _collect_visited_pages(url):
     url = normalize_url(url)
 
@@ -318,7 +329,7 @@ def _collect_visited_pages(url):
     ]
 
     v_pages = set()
-    url_len = len(url) + 1 # +1 to take slash '/' after the netloc
+    url_len = len(url) + 1  # +1 to take slash '/' after the netloc
     for cjid in crawl_job_ids:
         content_dir = os.path.join(app_config['contents_dir'], cjid)
         visited_by_job_pages = set(
@@ -384,12 +395,12 @@ def _upsert_report(_id, item: dict):
     else:
         report = {
             "id": _id,
-            "created_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
+            "created_at": datetime.now().replace(microsecond=0).isoformat(),
             "status": "scraping",
         }
 
     report.update(item)
-    report['updated_at'] = datetime.datetime.now().replace(microsecond=0).isoformat()
+    report['updated_at'] = datetime.now().replace(microsecond=0).isoformat()
     report.pop('data', None)
     with open(report_path, "w") as out:
         out.write(_pretty_json(report))
@@ -449,6 +460,7 @@ def _extract_data(data, report):
     counter = 0
     contents_dir = os.path.join(app_config["contents_dir"], report['id'])
     os.makedirs(contents_dir, exist_ok=True)
+    no_md_pages = set()
 
     for d in data:
         counter += 1
@@ -463,43 +475,50 @@ def _extract_data(data, report):
         }
 
         file_name = metadata['url'][len(report['crawl_url']):].strip("/").replace("/", "::")
-        if html := d.get('rawHtml'):
-            bs = BeautifulSoup(html, "html.parser")
 
-            topic = bs.find("a", class_="main__rubric")
-            metadata["topics"] = topic.text.strip() if topic else None
+        if md := d.get('markdown'):
+            if html := d.get('rawHtml'):
+                bs = BeautifulSoup(html, "html.parser")
 
-            date = bs.find("a", class_="main__date")
-            metadata['created_date'] = date.text.strip() if date else None
+                topic = bs.find("a", class_="main__rubric")
+                metadata["topics"] = topic.text.strip() if topic else None
 
-            title = bs.find("h1", class_="main__news-title")
-            metadata['title'] = title.text.strip() if title else (m.get('title') or m.get('ogTitle')) or None
+                date = bs.find("a", class_="main__date")
+                metadata['created_date'] = date.text.strip() if date else None
 
-            article_summary = bs.find("p", class_="main__news-lead")
-            metadata['article_summary'] = article_summary.text.strip() if article_summary else (m.get(
-                'description') or m.get('ogDescription')) or None
+                title = bs.find("h1", class_="main__news-title")
+                metadata['title'] = title.text.strip() if title else (m.get('title') or m.get('ogTitle')) or None
 
-            tags = bs.find("div", class_="page-main__tags")
-            metadata['tags'] = [t.text.strip() for t in tags.findAll("a", class_="page-main__option") if
-                                t] if tags else None
+                article_summary = bs.find("p", class_="main__news-lead")
+                metadata['article_summary'] = article_summary.text.strip() if article_summary else (m.get(
+                    'description') or m.get('ogDescription')) or None
 
-        if md := d['markdown']:
+                tags = bs.find("div", class_="page-main__tags")
+                metadata['tags'] = [t.text.strip() for t in tags.findAll("a", class_="page-main__option") if
+                                    t] if tags else None
             metadata['article_text'] = md
+
             with open(os.path.join(contents_dir, f"{file_name}.md"), "w") as f:
                 f.write(md)
+                if tags := metadata['tags']:
+                    f.write(f"\n{" ".join(tags)}")
+
             with open(os.path.join(contents_dir, f"{file_name}.json"), "w") as f:
                 f.write(_pretty_json(metadata))
+
             if html:
                 with open(os.path.join(contents_dir, f"{file_name}.html"), "w") as f:
                     f.write(html)
         else:
-            print("No markdown on a page:", metadata["url"])
+            no_md_pages.add(metadata["url"])
 
+    _update_no_md_pages(no_md_pages, report['id'])
     return _upsert_report(report['id'], {'downloaded_files': (counter + report.get('downloaded_files', 0))})
 
 
 def _escape(text):
     return f"\"{text}\"" if ": " in text else text
+
 
 def normalize_url(url):
     """
@@ -507,6 +526,25 @@ def normalize_url(url):
     """
     parse_url = urlparse(url)
     return urlunsplit([parse_url.scheme, parse_url.netloc, "", "", ""])
+
+
+def _update_no_md_pages(_new_no_md_pages, _id):
+    if not _new_no_md_pages:
+        return
+
+    no_md_pages_dir = os.path.join(app_config["no_md_pages"])
+    os.makedirs(no_md_pages_dir, exist_ok=True)
+
+    _path = os.path.join(no_md_pages_dir, f"{_id}.json")
+
+    _no_md_pages = set()
+    if os.path.exists(_path):
+        with open(_path, "r") as _f:
+            _no_md_pages = set(json.load(_f))
+
+    _no_md_pages.update(_new_no_md_pages)
+    with open(_path, "w") as _f:
+        _f.write(_pretty_json(list(_no_md_pages)))
 
 
 if __name__ == "__main__":
